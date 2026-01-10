@@ -197,4 +197,4 @@ def index():
     return render_template_string(HTML_PAGE, a4_result=a4_b64)
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run()
