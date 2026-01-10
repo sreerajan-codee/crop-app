@@ -5,6 +5,9 @@ from flask import Flask, request, render_template_string
 
 app = Flask(__name__)
 
+# ✅ LIMIT UPLOAD SIZE (VERY IMPORTANT)
+app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024  # 4MB
+
 # ---------- UI ----------
 HTML_PAGE = """
 <!doctype html>
@@ -55,7 +58,7 @@ DOWNLOAD
 # ---------- IMAGE PROCESSING ----------
 
 def order_points(pts):
-    rect = np.zeros((4,2), dtype="float32")
+    rect = np.zeros((4, 2), dtype="float32")
     s = pts.sum(axis=1)
     diff = np.diff(pts, axis=1)
     rect[0] = pts[np.argmin(s)]
@@ -66,17 +69,20 @@ def order_points(pts):
 
 def get_perfect_crop(img):
     h, w = img.shape[:2]
-    scale = 1000 / max(h, w)
-    img_small = cv2.resize(img, (int(w*scale), int(h*scale)))
 
+    # ✅ REDUCED SCALE (FAST & SAFE)
+    scale = 600 / max(h, w)
+    img_small = cv2.resize(img, (int(w * scale), int(h * scale)))
+
+    # Enhance edges lightly
     lab = cv2.cvtColor(img_small, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
     cl = clahe.apply(l)
-    enhanced = cv2.cvtColor(cv2.merge((cl,a,b)), cv2.COLOR_LAB2BGR)
+    enhanced = cv2.cvtColor(cv2.merge((cl, a, b)), cv2.COLOR_LAB2BGR)
 
     gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
-    edged = cv2.Canny(gray, 30, 150)
+    edged = cv2.Canny(gray, 40, 120)
     edged = cv2.dilate(edged, None, iterations=1)
 
     cnts, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -91,16 +97,16 @@ def get_perfect_crop(img):
         if len(approx) == 4:
             pts = approx.reshape(4,2).astype("float32") / scale
             rect = order_points(pts)
-            dst = np.array([[0,0],[target_w,0],[target_w,target_h],[0,target_h]], dtype="float32")
+            dst = np.array([
+                [0, 0],
+                [target_w, 0],
+                [target_w, target_h],
+                [0, target_h]
+            ], dtype="float32")
             M = cv2.getPerspectiveTransform(rect, dst)
             return cv2.warpPerspective(img, M, (target_w, target_h))
 
-    # GrabCut fallback (light)
-    mask = np.zeros(img.shape[:2], np.uint8)
-    rect_gc = (int(w*0.1), int(h*0.1), int(w*0.8), int(h*0.8))
-    bgd = np.zeros((1,65), np.float64)
-    fgd = np.zeros((1,65), np.float64)
-    cv2.grabCut(img, mask, rect_gc, bgd, fgd, 2, cv2.GC_INIT_WITH_RECT)
+    # ✅ SAFE FALLBACK (NO GRABCUT)
     return cv2.resize(img, (target_w, target_h))
 
 def create_a4_horizontal(front, back):
@@ -110,12 +116,14 @@ def create_a4_horizontal(front, back):
 
     fh, fw = front.shape[:2]
     gap = 100
-    cx, cy = a4_w//2, a4_h//2
-    start_x = cx - (fw*2 + gap)//2
-    start_y = cy - fh//2
+
+    cx, cy = a4_w // 2, a4_h // 2
+    start_x = cx - (fw * 2 + gap) // 2
+    start_y = cy - fh // 2
 
     canvas[start_y:start_y+fh, start_x:start_x+fw] = front
     canvas[start_y:start_y+fh, start_x+fw+gap:start_x+fw*2+gap] = back
+
     return canvas
 
 def to_base64(img):
@@ -124,23 +132,25 @@ def to_base64(img):
 
 # ---------- ROUTE ----------
 
-@app.route("/", methods=["GET","POST"])
+@app.route("/", methods=["GET", "POST"])
 def index():
     result = None
     if request.method == "POST":
         f = request.files.get("front_file")
         b = request.files.get("back_file")
+
         if f and b:
             img_f = cv2.imdecode(np.frombuffer(f.read(), np.uint8), cv2.IMREAD_COLOR)
             img_b = cv2.imdecode(np.frombuffer(b.read(), np.uint8), cv2.IMREAD_COLOR)
+
             if img_f is not None and img_b is not None:
-                a4 = create_a4_horizontal(
-                    get_perfect_crop(img_f),
-                    get_perfect_crop(img_b)
-                )
+                front = get_perfect_crop(img_f)
+                back = get_perfect_crop(img_b)
+                a4 = create_a4_horizontal(front, back)
                 result = to_base64(a4)
+
     return render_template_string(HTML_PAGE, a4_result=result)
 
-# ❌ DO NOT RUN FLASK SERVER LOCALLY ON RENDER
+# ---------- LOCAL RUN ----------
 if __name__ == "__main__":
-    pass
+    app.run(debug=True)
